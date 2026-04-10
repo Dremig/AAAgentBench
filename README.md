@@ -30,6 +30,34 @@ uv run python -m src.run --help
 - `pentagi`: uses PentAGI API to create/poll flows and auto-submit extracted flag candidates
 - `mako`: runs local `mako` repo `web_agent.cmd_agent` and submits extracted flag candidates
 
+## Mako Quick Start
+
+1. Ensure local layout:
+
+```text
+.../ctf-agent/
+  AAAgentBench/
+  mako/
+```
+
+2. Ensure `../mako/.env` contains a valid API config (for example `OPENAI_API_KEY` and `OPENAI_BASE_URL=https://yunwu.ai/v1`).
+3. Run one testcase:
+
+```bash
+uv run python -m src.run \
+  --platform nyu \
+  --solver mako \
+  --testcase 2021q-web-poem_collection \
+  --split test \
+  --timeout-sec 3600 \
+  --max-attempts 2 \
+  --mako-root ../mako \
+  --mako-max-steps 8 \
+  --save-result
+```
+
+Detailed guide: [docs/mako_solver.md](docs/mako_solver.md)
+
 ## Usage
 
 Run a single testcase:

@@ -115,6 +115,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable TLS certificate verification for PentAGI API.",
     )
     parser.add_argument(
+        "--mako-root",
+        default="../mako",
+        help="Path to mako repository root (for --solver mako).",
+    )
+    parser.add_argument(
+        "--mako-env",
+        default=".env",
+        help="Env file path relative to mako root.",
+    )
+    parser.add_argument(
+        "--mako-index",
+        default="rag_data/index.jsonl",
+        help="RAG index path relative to mako root.",
+    )
+    parser.add_argument(
+        "--mako-max-steps",
+        type=int,
+        default=12,
+        help="Maximum steps per mako attempt.",
+    )
+    parser.add_argument(
+        "--mako-cmd-timeout",
+        type=int,
+        default=25,
+        help="Per-command timeout passed to mako cmd_agent.",
+    )
+    parser.add_argument(
+        "--mako-worker-mode",
+        choices=["threaded", "sync"],
+        default="threaded",
+        help="Worker mode passed to mako cmd_agent.",
+    )
+    parser.add_argument(
         "--save-result",
         action="store_true",
         help="Save single-target run results to the local results directory.",
@@ -165,6 +198,17 @@ def create_solver_from_args(args: argparse.Namespace):
             pentagi_poll_interval_sec=args.pentagi_poll_interval_sec,
             pentagi_max_wait_sec=args.pentagi_max_wait_sec,
             pentagi_insecure_tls=not args.pentagi_verify_tls,
+        )
+    if args.solver == "mako":
+        return create_solver(
+            args.solver,
+            mako_root=args.mako_root,
+            mako_env=args.mako_env,
+            mako_index=args.mako_index,
+            max_attempts=args.max_attempts,
+            mako_max_steps=args.mako_max_steps,
+            mako_cmd_timeout=args.mako_cmd_timeout,
+            mako_worker_mode=args.mako_worker_mode,
         )
     return create_solver(args.solver)
 

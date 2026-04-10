@@ -28,6 +28,7 @@ uv run python -m src.run --help
 - `codex`: runs `codex exec` non-interactively and validates flags automatically
 - `manual`: simple interactive solver for testing
 - `pentagi`: uses PentAGI API to create/poll flows and auto-submit extracted flag candidates
+- `mako`: runs local `mako` repo `web_agent.cmd_agent` and submits extracted flag candidates
 
 ## Usage
 
@@ -75,6 +76,12 @@ Useful options:
 - `--pentagi-poll-interval-sec`: flow polling interval
 - `--pentagi-max-wait-sec`: max wait time per target
 - `--pentagi-verify-tls`: enable TLS verification (default is insecure for local self-signed certs)
+- `--mako-root`: local path to `mako` repository root (for `--solver mako`)
+- `--mako-env`: env file path relative to mako root
+- `--mako-index`: index path relative to mako root
+- `--mako-max-steps`: max challenge steps per mako attempt
+- `--mako-cmd-timeout`: command timeout passed to mako cmd_agent
+- `--mako-worker-mode`: `threaded` or `sync`
 
 Run with PentAGI solver:
 
@@ -91,11 +98,25 @@ uv run python -m src.run \
   --pentagi-provider custom
 ```
 
+Run with Mako solver:
+
+```bash
+uv run python -m src.run \
+  --platform nyu \
+  --solver mako \
+  --testcase 2021q-web-poem_collection \
+  --split test \
+  --timeout-sec 3600 \
+  --max-attempts 2 \
+  --mako-root ../mako \
+  --mako-max-steps 8
+```
+
 ## Adding a Solver
 
 1. Add a new solver class under [solver](src/solver).
 2. Implement the interface in [solver/base.py](src/solver/base.py).
-3. Register the solver name in [solver/\_\_init\_\_.py](src/solver/__init__.py).
+3. Register the solver name in [solver/__init__.py](src/solver/__init__.py).
 4. Expose any solver-specific CLI options in [run.py](src/run.py) if needed.
 
 Minimal interface:

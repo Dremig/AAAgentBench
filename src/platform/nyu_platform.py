@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
+import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -70,11 +73,7 @@ class NyuPlatform(BasePlatform):
             metadata=dict(target.metadata),
         )
 
-        connection_info = {
-            "server_name": "localhost" if challenge.server_name else None,
-            "port": challenge.port,
-            "server_type": challenge.server_type,
-        }
+        connection_info, runtime_network = self._resolve_connection_info(target.id, challenge)
 
         return Session(
             target=session_target,
@@ -85,6 +84,7 @@ class NyuPlatform(BasePlatform):
                 "flag": challenge.flag,
                 "container": challenge.container,
                 "tempdir": str(tempdir),
+                "runtime_network": runtime_network,
             },
         )
 
@@ -98,6 +98,25 @@ class NyuPlatform(BasePlatform):
 
     def cleanup(self, session: Session) -> None:
         logger.info("Cleaning up target id=%s", session.target.id)
+        runtime_network = session.metadata.get("runtime_network")
+        if isinstance(runtime_network, dict):
+            forwarder_name = str(runtime_network.get("forwarder_name") or "").strip()
+            if forwarder_name:
+                try:
+                    subprocess.run(
+                        ["docker", "rm", "-f", forwarder_name],
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    logger.info("Removed forwarder container target id=%s name=%s", session.target.id, forwarder_name)
+                except Exception:
+                    logger.warning(
+                        "Failed to remove forwarder container target id=%s name=%s",
+                        session.target.id,
+                        forwarder_name,
+                    )
         challenge = session.metadata.get("challenge")
         if challenge is not None:
             challenge.stop_challenge_container()
@@ -151,3 +170,169 @@ class NyuPlatform(BasePlatform):
                 shutil.copy2(source, destination)
             copied_files.append(str(destination))
         return copied_files
+
+    def _resolve_connection_info(self, target_id: str, challenge: CTFChallenge) -> tuple[dict[str, Any], dict[str, Any]]:
+        connection_info: dict[str, Any] = {
+            "server_name": "localhost" if challenge.server_name else None,
+            "port": challenge.port,
+            "server_type": challenge.server_type,
+        }
+        runtime_network: dict[str, Any] = {}
+        if challenge.server_type != "web" or not challenge.server_name or not challenge.port:
+            return connection_info, runtime_network
+
+        compose_path = Path(challenge.challenge_dir) / "docker-compose.yml"
+        if not compose_path.exists():
+            return connection_info, runtime_network
+
+        service_name = self._compose_primary_service(compose_path)
+        if not service_name:
+            return connection_info, runtime_network
+
+        mapped = self._compose_published_port(compose_path, service_name, int(challenge.port))
+        if mapped:
+            connection_info["port"] = mapped
+            runtime_network["resolved_via"] = "compose_port"
+            runtime_network["compose_service"] = service_name
+            logger.info(
+                "Resolved host port via compose target id=%s service=%s container_port=%s host_port=%s",
+                target_id,
+                service_name,
+                challenge.port,
+                mapped,
+            )
+            return connection_info, runtime_network
+
+        forwarder = self._start_forwarder(
+            target_id=target_id,
+            upstream_host=challenge.server_name,
+            upstream_port=int(challenge.port),
+        )
+        if forwarder:
+            connection_info["server_name"] = "127.0.0.1"
+            connection_info["port"] = forwarder["host_port"]
+            runtime_network.update(forwarder)
+            runtime_network["resolved_via"] = "forwarder"
+            runtime_network["compose_service"] = service_name
+            logger.info(
+                "Resolved web endpoint via forwarder target id=%s upstream=%s:%s local=127.0.0.1:%s",
+                target_id,
+                challenge.server_name,
+                challenge.port,
+                forwarder["host_port"],
+            )
+        return connection_info, runtime_network
+
+    @staticmethod
+    def _compose_primary_service(compose_path: Path) -> str:
+        try:
+            out = subprocess.check_output(
+                ["docker", "compose", "-f", str(compose_path), "config", "--services"],
+                text=True,
+            )
+        except Exception:
+            return ""
+        for line in out.splitlines():
+            name = line.strip()
+            if name:
+                return name
+        return ""
+
+    @staticmethod
+    def _compose_published_port(compose_path: Path, service_name: str, container_port: int) -> int | None:
+        try:
+            out = subprocess.check_output(
+                ["docker", "compose", "-f", str(compose_path), "port", service_name, str(container_port)],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception:
+            return None
+        for line in out.splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            match = re.search(r":(\d+)$", text)
+            if not match:
+                continue
+            try:
+                return int(match.group(1))
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _start_forwarder(target_id: str, upstream_host: str, upstream_port: int) -> dict[str, Any]:
+        safe_target = re.sub(r"[^a-zA-Z0-9_.-]", "-", target_id).lower()
+        suffix = uuid.uuid4().hex[:8]
+        name = f"aaabench-fw-{safe_target}-{suffix}"[:63]
+        listen_port = upstream_port
+        run_cmd = [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            name,
+            "--network",
+            "ctfnet",
+            "-p",
+            f"127.0.0.1::{listen_port}",
+            "alpine/socat",
+            "-d",
+            "-d",
+            f"TCP-LISTEN:{listen_port},fork,reuseaddr",
+            f"TCP:{upstream_host}:{upstream_port}",
+        ]
+        try:
+            subprocess.check_output(run_cmd, text=True, stderr=subprocess.STDOUT)
+            port_out = subprocess.check_output(
+                ["docker", "port", name, f"{listen_port}/tcp"],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to start forwarder for target id=%s upstream=%s:%s error=%s",
+                target_id,
+                upstream_host,
+                upstream_port,
+                exc,
+            )
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", name],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except Exception:
+                pass
+            return {}
+
+        host_port = None
+        for line in port_out.splitlines():
+            match = re.search(r":(\d+)$", line.strip())
+            if not match:
+                continue
+            try:
+                host_port = int(match.group(1))
+                break
+            except ValueError:
+                continue
+        if not host_port:
+            subprocess.run(
+                ["docker", "rm", "-f", name],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            return {}
+        return {
+            "forwarder_name": name,
+            "forwarder_upstream_host": upstream_host,
+            "forwarder_upstream_port": upstream_port,
+            "host_port": host_port,
+        }
